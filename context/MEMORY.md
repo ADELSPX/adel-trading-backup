@@ -18,8 +18,11 @@
 
 - Has his own GitHub account (username ADELSPX) and his own private repositories on it — his 2026-10-30 selection screenshot showed ADELSPX/fazza-ai, fazza-recovery, hermes-backup, SPX_Analyzer_Project (private), plus hermes-agent, qiyas-app, mawheb. Firm boundary (2026-10-30): do not touch or mix our work into any of his existing repositories. Our backup must be a completely separate new private repository, with Muse's access limited to that new repository only.
 
+- On 2026-11-01 عادل asked for the best way to register/sign in to Muse (he wants durable access and not to lose his account), and expressed a new learning interest beyond trading: training/education in **reverse engineering and ethical hacking** — he asked Muse to research learning paths for it. Muse gave him a staged roadmap (foundations → legal labs → specialization) and offered to build him a personal study plan; he had not yet accepted or set a schedule as of that reply.
+
 ## Preferences
 - Prefers to communicate in Arabic (asked on 2026-10-30).
+- Prefers Muse's appearance to express a professional AI (chose Option 2 on 2026-11-01).
 
 ## Commitments
 - Backup repository DONE and active (2026-10-30): ADELSPX/adel-trading-backup (private, branch main) — created by عادل himself after Muse's integration could not create repositories (403); he selected only this repository in the Muse GitHub App installation, and Muse verified read access (README + commits). First snapshot pushed 2026-10-30: 6 files (BACKUP.md, project/README.md, project/CHANNEL_EXAMINATION.md, project/STRATEGY.md, context/MEMORY.md, context/USER.md), commit 5a1f96dc672c67e3c34c85e7cce2833cc4c7a809. Backup source is ~/workspace/trading-project; sync record at ~/workspace/trading-project.muse-github-snapshot-sync.json. Cron job trading-backup-6h repeats the snapshot every 6 hours (first run ~Sat 2026-10-31 03:38 Asia/Riyadh), silently when nothing changed. Snapshot method limits: UTF-8 text only, 16 MiB / 2000 files per snapshot, no binary files and no automatic deletions — revisit the method with عادل if the trading work outgrows this. His earlier "انسَ المستودع" was a dictation error for "أنشئ المستودع".
