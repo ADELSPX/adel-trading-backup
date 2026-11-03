@@ -161,7 +161,7 @@ def strike_for_delta(spot, t_years, iv, is_call, target_delta):
 
 
 def run(block_sideways=False, cooldown_same_center=False, strongest_only=False,
-        dte_lo=7, dte_hi=14, target_delta=None):
+        dte_lo=7, dte_hi=14, target_delta=None, block_two_stops=False):
     days = load_bars("SPY")
     vix = load_vix()
     vix_dates = sorted(vix)
@@ -173,6 +173,19 @@ def run(block_sideways=False, cooldown_same_center=False, strongest_only=False,
             print(f"-- {day}: لا بيانات")
             continue
         stopped_centers = {}  # مركز -> وقت آخر وقف عنده (لتهدئة إعادة الدخول)
+        stop_streak = {}      # مركز -> عدد الوقفات المتتالية لصفقاته (لحظر المركز بعد وقفين)
+        blocked_centers = set()  # مراكز محظورة بقية الجلسة (تحسين 2026-11-02)
+
+        def note_close(center, is_stop):
+            """تحديث سلسلة الوقفات عند إغلاق صفقة (متسق مع paper_manager.py)."""
+            if center is None:
+                return
+            if is_stop:
+                stop_streak[center] = stop_streak.get(center, 0) + 1
+                if stop_streak[center] >= 2:
+                    blocked_centers.add(center)
+            else:
+                stop_streak[center] = 0
         iv = 0.18
         prev = [d for d in vix_dates if d < day]
         if prev:
@@ -195,6 +208,8 @@ def run(block_sideways=False, cooldown_same_center=False, strongest_only=False,
                     if cooldown_same_center and ev.center in stopped_centers:
                         if (bar.t - stopped_centers[ev.center]) < timedelta(minutes=60):
                             continue
+                    if block_two_stops and ev.center in blocked_centers:
+                        continue
                     fill = bars[i + 1]
                     spot0 = fill.o
                     is_call = ev.kind == "CALL"
@@ -218,6 +233,7 @@ def run(block_sideways=False, cooldown_same_center=False, strongest_only=False,
                     close_trade(trades, tr, bar.t, bar.c, prem_out, "محرك: " + ev.reason)
                     if "لمس المركز" in ev.reason and tr.get("center") is not None:
                         stopped_centers[tr["center"]] = bar.t
+                    note_close(tr.get("center"), "لمس المركز" in ev.reason)
                     open_trade = None
 
             if open_trade is not None and i > open_trade["fill_idx"]:
@@ -236,13 +252,16 @@ def run(block_sideways=False, cooldown_same_center=False, strongest_only=False,
                 adv_run = adv_run + 1 if adverse else 0
                 if prem_worst <= stop_lvl:
                     close_trade(trades, tr, bar.t, bar.c, stop_lvl, "وقف بريميوم ‎-20%")
+                    note_close(tr.get("center"), True)
                     open_trade = None
                 elif prem_best >= tgt_lvl:
                     close_trade(trades, tr, bar.t, bar.c, tgt_lvl, "هدف بريميوم ‎+30%")
+                    note_close(tr.get("center"), False)
                     open_trade = None
                 elif adv_run >= 2:
                     prem_out = bs_price(bar.c, tr["strike"], tt, iv, is_call)
                     close_trade(trades, tr, bar.t, bar.c, prem_out, "شمعتان معاكستان")
+                    note_close(tr.get("center"), False)
                     open_trade = None
             # نهاية اليوم: إغلاق قسري
             if open_trade is not None and i == len(bars) - 1:
@@ -250,6 +269,7 @@ def run(block_sideways=False, cooldown_same_center=False, strongest_only=False,
                 tt = (tr["expiry"] - bar.t).total_seconds() / (365.0 * 24 * 3600)
                 prem_out = bs_price(bar.c, tr["strike"], tt, iv, tr["is_call"])
                 close_trade(trades, tr, bar.t, bar.c, prem_out, "نهاية اليوم (محاكاة)")
+                note_close(tr.get("center"), False)
                 open_trade = None
     return trades
 
@@ -293,6 +313,8 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--block-sideways", action="store_true")
+    ap.add_argument("--block-two-stops", action="store_true",
+                    help="حظر المركز بقية الجلسة بعد وقفين متتاليين عنده (تحسين 2026-11-02)")
     ap.add_argument("--cooldown", action="store_true")
     ap.add_argument("--strongest-only", action="store_true")
     ap.add_argument("--dte-lo", type=int, default=7)
@@ -302,7 +324,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
     trades = run(block_sideways=args.block_sideways, cooldown_same_center=args.cooldown,
                  strongest_only=args.strongest_only, dte_lo=args.dte_lo, dte_hi=args.dte_hi,
-                 target_delta=args.target_delta)
+                 target_delta=args.target_delta, block_two_stops=args.block_two_stops)
     if args.quiet:
         n = len(trades); wins = [t for t in trades if t["pnl"] > 0]
         reasons = {}

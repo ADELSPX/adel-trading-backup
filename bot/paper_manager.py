@@ -5,6 +5,10 @@
 
 - بوابات الدخول: أقوى مركز فقط، حجب العرضي، تهدئة 60 دقيقة بعد وقف عند
   المركز نفسه (قواعد الحلقات + فلتر الباك-تست الأفضل).
+- تحسينا المرحلة الورقية المعتمدان 2026-11-02 (من نصوص فهد، HANDOVER §4/§7):
+  حظر المركز بقية الجلسة بعد وقفين متتاليين عنده (تعريفه للسوق العرضي)،
+  وحد خسارة يومي أقصى اختياري يوقف الدخول بقية الجلسة عند بلوغه — قيمته
+  تُحسم مع عادل قبل أول تشغيل ورقي، لذا افتراضيًا غير مفعّل (None).
 - الخروج (الأسبق يفوز): وقف بريميوم −20% | هدف بريميوم +30% (بيع كامل) |
   شمعتان معاكستان متتاليتان | خروج المحرك (مركز/هدف/60د) | إغلاق نهاية اليوم.
 - التكاليف: عمولة IBKR 0.65$ للعقد لكل جهة + 0.10$ رسوم ≈ 1.40$ للصفقة
@@ -16,7 +20,7 @@
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 STOP_PCT = 0.20
@@ -24,6 +28,7 @@ TARGET_PCT = 0.30
 COMMISSION_RT = 1.40
 MULTIPLIER = 100
 COOLDOWN_MINUTES = 60
+BLOCK_AFTER_CONSECUTIVE_STOPS = 2
 
 
 @dataclass
@@ -54,17 +59,59 @@ class PaperTradeManager:
     """صفقة واحدة في كل مرة (قاعدة المؤشر)، وبوابات دخول قبل أي فتح."""
 
     def __init__(self, strongest_only: bool = True, block_sideways: bool = True,
-                 cooldown_minutes: int = COOLDOWN_MINUTES):
+                 cooldown_minutes: int = COOLDOWN_MINUTES,
+                 block_after_two_stops: bool = True,
+                 daily_max_loss: Optional[float] = None):
+        if daily_max_loss is not None and daily_max_loss <= 0:
+            raise ValueError("حد الخسارة اليومي يجب أن يكون مبلغًا موجبًا أو None")
         self.strongest_only = strongest_only
         self.block_sideways = block_sideways
         self.cooldown = timedelta(minutes=cooldown_minutes)
+        self.block_after_two_stops = block_after_two_stops
+        self.daily_max_loss = daily_max_loss
         self.position: Optional[Position] = None
         self.trades: list[Trade] = []
         self.last_stop: dict[float, datetime] = {}
+        # حالة الجلسة (تُصفَّر عند تغيّر التاريخ أو بـ reset_session):
+        # وقفان متتاليان عند مركز = عدد الوقفات المتتالية لصفقات ذلك المركز،
+        # ويُصفَّر بإغلاق غير وقفي عند المركز نفسه.
+        self.stop_streak: dict[float, int] = {}
+        self.blocked_centers: set[float] = set()
+        self.session_date: Optional[date] = None
+
+    def reset_session(self, day: Optional[date] = None):
+        """بداية جلسة جديدة: تصفير الحظر والتهدئة وسلسلة الوقفات وعدّاد اليوم."""
+        self.last_stop = {}
+        self.stop_streak = {}
+        self.blocked_centers = set()
+        self.session_date = day
+
+    def _rollover(self, t: Optional[datetime]):
+        """تصفير حالة الجلسة تلقائيًا عند أول حدث في تاريخ جديد (بلا صفقة مفتوحة)."""
+        if t is None or self.position is not None:
+            return
+        if self.session_date is None:
+            self.session_date = t.date()
+        elif t.date() != self.session_date:
+            self.reset_session(t.date())
+
+    @property
+    def session_pnl(self) -> float:
+        """صافي صفقات الجلسة الحالية فقط (بحسب تاريخ إغلاقها)."""
+        if self.session_date is None:
+            return self.total_pnl
+        return round(sum(tr.pnl for tr in self.trades
+                         if tr.exit_t.date() == self.session_date), 2)
+
+    @property
+    def daily_loss_limit_reached(self) -> bool:
+        return self.daily_max_loss is not None \
+            and self.session_pnl <= -self.daily_max_loss
 
     def can_enter(self, center: Optional[float], strongest_center: Optional[float] = None,
                   sideways: bool = False, now: Optional[datetime] = None):
         """(مسموح؟، السبب). تُستدعى قبل open() عند كل إشارة من المحرك."""
+        self._rollover(now)
         if self.position is not None:
             return False, "صفقة مفتوحة"
         if self.block_sideways and sideways:
@@ -72,6 +119,10 @@ class PaperTradeManager:
         if self.strongest_only and strongest_center is not None \
                 and center is not None and center != strongest_center:
             return False, "ليس أقوى مركز"
+        if center is not None and center in self.blocked_centers:
+            return False, "محظور بقية الجلسة — وقفان متتاليان عند المركز نفسه (سوق عرضي)"
+        if self.daily_loss_limit_reached:
+            return False, "بلغ حد الخسارة اليومي الأقصى — توقف لليوم"
         if center is not None and now is not None and center in self.last_stop:
             if now - self.last_stop[center] < self.cooldown:
                 return False, "تهدئة بعد وقف عند المركز نفسه"
@@ -79,6 +130,7 @@ class PaperTradeManager:
 
     def open(self, direction: str, premium: float, t: datetime,
              center: Optional[float] = None) -> Position:
+        self._rollover(t)
         if self.position is not None:
             raise ValueError("صفقة مفتوحة بالفعل")
         if direction not in ("CALL", "PUT"):
@@ -115,8 +167,21 @@ class PaperTradeManager:
     def _close(self, premium: float, t: datetime, reason: str, stop: bool = False):
         pos = self.position
         self.position = None
-        if stop and pos.center is not None:
-            self.last_stop[pos.center] = t
+        if self.session_date is None:
+            self.session_date = t.date()
+        elif t.date() != self.session_date:
+            # إغلاق في يوم جديد (لا يحدث في التشغيل السليم — لا مبيت): جلسة جديدة.
+            self.reset_session(t.date())
+        if pos.center is not None:
+            if stop:
+                self.last_stop[pos.center] = t
+                self.stop_streak[pos.center] = self.stop_streak.get(pos.center, 0) + 1
+                if self.block_after_two_stops \
+                        and self.stop_streak[pos.center] >= BLOCK_AFTER_CONSECUTIVE_STOPS:
+                    self.blocked_centers.add(pos.center)
+            else:
+                # إغلاق غير وقفي عند المركز نفسه يقطع تتالي الوقفات عنده.
+                self.stop_streak[pos.center] = 0
         trade = Trade(pos.direction, pos.center, pos.entry_t, pos.entry_premium, t, premium, reason)
         self.trades.append(trade)
         return trade
@@ -124,6 +189,20 @@ class PaperTradeManager:
     @property
     def total_pnl(self) -> float:
         return round(sum(tr.pnl for tr in self.trades), 2)
+
+    def session_summary(self) -> dict:
+        """ملخص جلسة قابل للسجل/التقرير اليومي (جزء سجل المعايرة الخاص بالصفقات)."""
+        todays = [tr for tr in self.trades
+                  if self.session_date is not None and tr.exit_t.date() == self.session_date]
+        return {
+            "date": self.session_date.isoformat() if self.session_date else None,
+            "trades": len(todays),
+            "session_pnl": self.session_pnl,
+            "total_pnl": self.total_pnl,
+            "blocked_centers": sorted(self.blocked_centers),
+            "daily_max_loss": self.daily_max_loss,
+            "daily_loss_limit_reached": self.daily_loss_limit_reached,
+        }
 
 
 if __name__ == "__main__":
@@ -153,3 +232,42 @@ if __name__ == "__main__":
     assert tr is not None and tr.reason == "نهاية اليوم" and abs(tr.pnl - 8.60) < 1e-9, tr
     assert m.total_pnl == 12.40, m.total_pnl
     print(f"paper_manager smoke test OK: {len(m.trades)} trades, total_pnl={m.total_pnl}$")
+
+    # اختبار الحظر بعد وقفين متتاليين عند نفس المركز (تحسين 2026-11-02):
+    m2 = PaperTradeManager(strongest_only=False)
+    m2.open("CALL", 1.50, t0, center=700.0)
+    m2.on_premium(1.20, t0)  # وقف أول −20%
+    ok, _ = m2.can_enter(700.0, now=t0 + timedelta(minutes=61))
+    assert ok  # وقف واحد لا يحظر — تهدئة فقط وانقضت
+    m2.open("PUT", 1.50, t0 + timedelta(minutes=61), center=700.0)
+    m2.on_premium(1.20, t0 + timedelta(minutes=61))  # وقف ثانٍ متتالٍ
+    ok, why = m2.can_enter(700.0, now=t0 + timedelta(hours=5))
+    assert not ok and "محظور بقية الجلسة" in why, why
+    ok, _ = m2.can_enter(710.0, now=t0 + timedelta(hours=5))
+    assert ok  # الحظر على ذلك المركز فقط
+    ok, _ = m2.can_enter(700.0, now=t0 + timedelta(days=1))
+    assert ok  # جلسة جديدة في اليوم التالي ترفع الحظر
+    # إغلاق رابح عند المركز يقطع تتالي الوقفات:
+    m3 = PaperTradeManager(strongest_only=False)
+    m3.open("CALL", 1.50, t0, center=700.0)
+    m3.on_premium(1.20, t0)  # وقف
+    m3.open("CALL", 1.20, t0 + timedelta(minutes=61), center=700.0)
+    m3.on_premium(1.56, t0 + timedelta(minutes=61))  # هدف +30% — يقطع التتالي
+    m3.open("CALL", 1.50, t0 + timedelta(minutes=62), center=700.0)
+    m3.on_premium(1.20, t0 + timedelta(minutes=62))  # وقف — سلسلة جديدة من 1
+    ok, _ = m3.can_enter(700.0, now=t0 + timedelta(hours=4))
+    assert ok
+    print("paper_manager two-stop session block OK")
+
+    # اختبار حد الخسارة اليومي (عند تفعيله بقيمة):
+    m4 = PaperTradeManager(strongest_only=False, daily_max_loss=50.0)
+    m4.open("CALL", 1.50, t0, center=700.0)
+    m4.on_premium(1.20, t0)  # −31.40$
+    m4.open("PUT", 1.50, t0 + timedelta(minutes=61), center=710.0)
+    m4.on_premium(1.20, t0 + timedelta(minutes=61))  # −31.40$ — المجموع −62.80$
+    assert m4.daily_loss_limit_reached and m4.session_pnl == -62.80
+    ok, why = m4.can_enter(720.0, now=t0 + timedelta(hours=3))
+    assert not ok and "حد الخسارة اليومي" in why, why
+    ok, _ = m4.can_enter(720.0, now=t0 + timedelta(days=1))
+    assert ok  # يوم جديد: يُصفَّر عدّاد الخسارة اليومية
+    print(f"paper_manager daily loss limit OK: {m4.session_summary()}")
