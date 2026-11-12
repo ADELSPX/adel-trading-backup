@@ -30,7 +30,8 @@ import csv
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 try:
     from ibapi.client import EClient
@@ -124,8 +125,10 @@ class ChainApp(EWrapper, EClient):
 
 
 def pick_expiry(expirations):
-    """أقرب انتهاء يبعد 5–14 يومًا من اليوم (قاعدة المشروع: أسبوع–أسبوعان)."""
-    today = datetime.now(timezone.utc).date()
+    """أقرب انتهاء يبعد 5–14 يومًا من اليوم بتوقيت السوق ET
+    (قاعدة المشروع: أسبوع–أسبوعان). يعيد None إن لم يوجد انتهاء مناسب —
+    لا يرجع عقدًا يوميًا أبدًا."""
+    today = datetime.now(ZoneInfo("America/New_York")).date()
     parsed = []
     for e in expirations:
         try:
@@ -137,7 +140,7 @@ def pick_expiry(expirations):
     for d, e in parsed:
         if 5 <= (d - today).days <= 14:
             return e
-    return parsed[0][1] if parsed else None
+    return None
 
 
 def main():
@@ -213,6 +216,10 @@ def main():
         return 2
     exps, strikes_all = app.opt_params[0]
     expiry = pick_expiry(exps)
+    if expiry is None:
+        print("⛔ لا يوجد انتهاء ضمن 5–14 يومًا — توقف (لا عقود يومية).")
+        app.disconnect()
+        return 2
     lo, hi = spot * (1 - args.range_pct / 100), spot * (1 + args.range_pct / 100)
     strikes = [s for s in strikes_all if lo <= s <= hi]
     print(f"الانتهاء المختار: {expiry} | استرايكات ضمن ±{args.range_pct}%: {len(strikes)}")
@@ -220,6 +227,7 @@ def main():
     # عقود الخيارات — بثّ مباشر (streaming) حتى وصول القاما + OI ثم إلغاء
     rows = []
     req = 100
+    delayed_fixed = False
     for k in strikes:
         for right in ("C", "P"):
             req += 1
@@ -240,6 +248,15 @@ def main():
                 d = app.details.get(key, {})
                 if d.get("gamma") is not None and d.get("oi") is not None:
                     break
+                if app.need_delayed and not delayed_fixed:
+                    # خطأ 10089 أثناء السلسلة: حوّل للمتأخرة وأعد طلب هذا العقد
+                    print("⚠️ لا بيانات حية (10089) — التحويل لبيانات متأخرة وإعادة طلب العقد.")
+                    app.reqMarketDataType(3)
+                    delayed_fixed = True
+                    app.cancelMktData(req)
+                    time.sleep(0.5)
+                    app.reqMktData(req, c, GENERIC_TICKS, False, False, [])
+                    deadline = time.time() + 8
                 time.sleep(0.2)
             app.cancelMktData(req)
             d = app.details.get(key, {})

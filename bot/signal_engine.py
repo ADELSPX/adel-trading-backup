@@ -67,6 +67,16 @@ def _touched(levels, h, l, ref):
     return r
 
 
+def _band_tol(levels, c, close):
+    """سماكة شريط العرضي لمركز: 10% من المسافة لأقرب مركز مجاور (SW_THICK)،
+    أو 0.1% من السعر عند غياب مركز مجاور."""
+    neigh = [v for v in levels if v != c]
+    if not neigh:
+        return close * PRICE_PCT / 100.0
+    dist = min(abs(v - c) for v in neigh)
+    return dist * SW_THICK / 100.0
+
+
 def _zone_tol(levels, c, direction, close):
     """مسافة القرب لمركز: 15% من المسافة للمركز التالي باتجاه الصفقة."""
     if c is None:
@@ -99,6 +109,7 @@ class MakerCentersEngine:
         self.entry_idx = None
         self.bar_idx = -1
         self.history: list[Bar] = []
+        self._warned_empty = None
 
     def on_bar(self, bar: Bar) -> list[Event]:
         """يُستدعى عند إغلاق كل شمعة. يعيد أحداث هذا الشمعة (دخول/خروج)."""
@@ -113,6 +124,9 @@ class MakerCentersEngine:
         self.history.append(bar)
         lv = self.levels
         if not lv:
+            if getattr(self, "_warned_empty", None) != self.day:
+                self._warned_empty = self.day
+                print(f"تحذير: المحرك بلا مستويات ليوم {self.day} — لن يصدر إشارات.")
             return events
 
         is_green = bar.c > bar.o
@@ -165,6 +179,14 @@ class MakerCentersEngine:
             elif near_a is not None:
                 self.last_ctr = near_a
 
+        # عرضي مركز الدخول: لمساته (ضمن شريط 10%) في آخر 4 شموع.
+        # يُحسب لمركز الدخول last_ctr لا لمسة الشمعة الحالية، لأن إشارة
+        # الدخول نفسها تشترط شمعة نظيفة (tc is None) فكان العلم دائمًا False.
+        entry_sideways = False
+        if self.last_ctr is not None:
+            band = _band_tol(lv, self.last_ctr, bar.c)
+            entry_sideways = self._touch_count_band(self.last_ctr, band) >= SW_MIN
+
         # 4) الشموع النظيفة بجانب المركز
         g_side = is_green and tc is None and self.last_ctr is not None and cb is not None and cb == self.last_ctr
         r_side = is_red and tc is None and self.last_ctr is not None and ca is not None and ca == self.last_ctr
@@ -185,7 +207,7 @@ class MakerCentersEngine:
                 self.entry_idx = self.bar_idx
                 self.st_bar_idx = self.bar_idx
                 events.append(Event("CALL", bar.t, bar.c, center=self.st_ctr,
-                                    target=tgt, stop=self.stop, sideways=sideways))
+                                    target=tgt, stop=self.stop, sideways=entry_sideways))
             elif self.r_run == N_CANDLES:
                 tgt = _below(lv, self.last_ctr)
                 tol = None if tgt is None else (self.last_ctr - tgt) * NEAR_PCT / 100.0
@@ -198,7 +220,7 @@ class MakerCentersEngine:
                 self.entry_idx = self.bar_idx
                 self.st_bar_idx = self.bar_idx
                 events.append(Event("PUT", bar.t, bar.c, center=self.st_ctr,
-                                    target=tgt, stop=self.stop, sideways=sideways))
+                                    target=tgt, stop=self.stop, sideways=entry_sideways))
         return events
 
     def _touch_count(self, c) -> int:
@@ -207,6 +229,14 @@ class MakerCentersEngine:
         n = 0
         for b in self.history[-SW_LEN:]:
             if b.l <= c <= b.h:
+                n += 1
+        return n
+
+    def _touch_count_band(self, c, band) -> int:
+        """عدد الشموع في آخر SW_LEN شموع التي لامست المركز ضمن الشريط."""
+        n = 0
+        for b in self.history[-SW_LEN:]:
+            if b.l <= c + band and b.h >= c - band:
                 n += 1
         return n
 

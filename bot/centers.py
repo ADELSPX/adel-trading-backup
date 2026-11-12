@@ -97,6 +97,9 @@ def compute_centers(snapshots: list[WeeklySnapshot]) -> tuple[list[Center], Opti
         weeks_present = len({t.week for t in cl})
         if weeks_present < MIN_REPEATS:
             continue
+        # أفق الصلاحية أسبوعان: برج غاب عن آخر أسبوعين يُهمل حتى لو تكرر قبلها.
+        if max(t.week for t in cl) < len(snaps) - 2:
+            continue
         wsum = sum(t.strength for t in cl)
         price = sum(t.strike * t.strength for t in cl) / wsum
         mean_strength = wsum / len(snaps)

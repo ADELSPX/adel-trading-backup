@@ -7,7 +7,8 @@
 - تسعير العقد: Black-Scholes بـ IV = إغلاق VIX لليوم السابق، r=4%، توزيعات SPY ‏1.3%.
 - الخروج (الأسبق يفوز): وقف بريميوم ‎−20%‎ | هدف بريميوم ‎+30%‎ (بيع كامل) |
   شمعتان معاكستان متتاليتان (قاعدة البصمات) | خروج المحرك (مركز/هدف/60د/نهاية يوم).
-- التكاليف: عمولة IBKR ‏0.65$ للعقد لكل جهة + 0.10$ رسوم ≈ 1.40$ للصفقة الكاملة.
+- التكاليف: عمولة IBKR بحد أدنى 1.00$ لكل أمر (عقد واحد = 1.00$ للجهة)
+  + ~0.10$ رسوم ≈ 2.10$ للصفقة الكاملة (صُححت 2026-11-12 من جدول IBKR).
 هذا نموذج تقريبي (IV ثابت خلال اليوم، بلا سبريد) — نتائجه للاتجاه العام لا للدقة المطلقة.
 """
 from __future__ import annotations
@@ -69,7 +70,7 @@ DAY_LEVELS[date(2026, 10, 30)] = LEVEL_SETS["I"]
 
 STOP_PCT = 0.20
 TARGET_PCT = 0.30
-COMMISSION_RT = 1.40
+COMMISSION_RT = 2.10
 R_FREE = 0.04
 DIV_YIELD = 0.013
 
@@ -119,6 +120,7 @@ def load_vix():
                 out[datetime.fromtimestamp(t, ET).date()] = c
         return out
     except Exception:
+        print("تحذير: ملف VIX غير موجود — IV افتراضي 18% لكل الأيام.")
         return {}
 
 
@@ -229,14 +231,28 @@ def run(block_sideways=False, cooldown_same_center=False, strongest_only=False,
                 elif ev.kind == "EXIT" and open_trade is not None:
                     tr = open_trade
                     tt = (tr["expiry"] - bar.t).total_seconds() / (365.0 * 24 * 3600)
-                    prem_out = bs_price(bar.c, tr["strike"], tt, iv, tr["is_call"])
-                    close_trade(trades, tr, bar.t, bar.c, prem_out, "محرك: " + ev.reason)
+                    # تسعير الخروج عند مستوى التفعيل لا إغلاق الشمعة: الوقف
+                    # يُضرب عند المركز، والهدف عند المركز التالي؛ أما مخارج
+                    # الوقت (60 دقيقة/نهاية اليوم) فتُسعَّر بالإغلاق.
+                    if "لمس المركز" in ev.reason and tr.get("center") is not None:
+                        exit_spot = tr["center"]
+                    elif "المركز التالي" in ev.reason and tr.get("target_ctr") is not None:
+                        # السعر بلغ الهدف أو اقترب منه ضمن الهامش: سعر الخروج هو
+                        # أقصى ما بلغه السعر فعلًا في الشمعة، بما لا يتجاوز الهدف
+                        # (تسعير الهدف الكامل يبالغ حين يكون التفعيل بهامش 15%).
+                        exit_spot = min(bar.h, tr["target_ctr"]) if tr["is_call"] \
+                            else max(bar.l, tr["target_ctr"])
+                    else:
+                        exit_spot = bar.c
+                    prem_out = bs_price(exit_spot, tr["strike"], tt, iv, tr["is_call"])
+                    close_trade(trades, tr, bar.t, exit_spot, prem_out, "محرك: " + ev.reason)
                     if "لمس المركز" in ev.reason and tr.get("center") is not None:
                         stopped_centers[tr["center"]] = bar.t
                     note_close(tr.get("center"), "لمس المركز" in ev.reason)
                     open_trade = None
 
-            if open_trade is not None and i > open_trade["fill_idx"]:
+            if open_trade is not None and i >= open_trade["fill_idx"]:
+                # شمعة التعبئة نفسها مراقبة للوقف/الهدف (كانت تُتخطى قبل الإصلاح).
                 tr = open_trade
                 tt = (tr["expiry"] - bar.t).total_seconds() / (365.0 * 24 * 3600)
                 is_call = tr["is_call"]
@@ -253,6 +269,8 @@ def run(block_sideways=False, cooldown_same_center=False, strongest_only=False,
                 if prem_worst <= stop_lvl:
                     close_trade(trades, tr, bar.t, bar.c, stop_lvl, "وقف بريميوم ‎-20%")
                     note_close(tr.get("center"), True)
+                    if tr.get("center") is not None:
+                        stopped_centers[tr["center"]] = bar.t  # تهدئة موحدة مع المدير
                     open_trade = None
                 elif prem_best >= tgt_lvl:
                     close_trade(trades, tr, bar.t, bar.c, tgt_lvl, "هدف بريميوم ‎+30%")
